@@ -1,0 +1,375 @@
+organizationID = organization.get("organization_id");
+salesOrderId = salesorder.get("salesorder_id");
+//checking status of the order
+orderStatusID = "1000";
+zohoOrderStatus = salesorder.get("status_formatted");
+if(zohoOrderStatus.containsIgnoreCase("void"))
+{
+	//"Voided" ID is 60 on all stores
+	orderStatusID = "60";
+}
+else
+{
+	//this is used to get the invoiced status of the order. the regular salesorder zoho gives you does not provide this, but this API call will
+	salesorderResponse = invokeurl
+	[
+		url :"https://www.zohoapis.com/inventory/v1/salesorders/" + salesOrderId + "?organization_id=" + organizationID
+		type :GET
+		connection:"zom"
+	];
+	if(salesorderResponse.get("code") != 0)
+	{
+		sendmail
+		[
+			from :zoho.loginuserid
+			to :~REDACTED~
+			subject :"Function updateOrderStatusOnStore Error on Zoho Inventory"
+			message :"Error fetching sales order. ID: " + salesOrderId + ", Error: " + salesorderResponse.toString()
+		]
+	}
+	salesorderRes = salesorderResponse.get("salesorder");
+	invoicedStatus = salesorderRes.get("invoiced_status").lower();
+	if(invoicedStatus == "invoiced")
+	{
+		orderStatusID = "70";
+		//"Shipped" ID is 70 on all stores. putting this by default, and if all the tracking numbers are delivered, it will get overrode by the delivered status.
+		packages = salesorderRes.get("packages");
+		trackingNumbers = List();
+		//adding each package's and PO's carrier and tracking number to a map, and then to a list to check if delivered with aftership API
+		for each  package in packages
+		{
+			packageMap = Map();
+			packageCarrier = package.get("carrier");
+			packageTrackingNumber = package.get("shipment_order").get("tracking_number");
+			if(packageTrackingNumber != "0000000000")
+			{
+				packageMap.put("carrier",packageCarrier);
+				packageMap.put("tracking",trim(packageTrackingNumber));
+				trackingNumbers.add(packageMap);
+			}
+		}
+		salDropShip = salesorderRes.get("is_dropshipped");
+		if(salDropShip == "true")
+		{
+			//pulling all associated purchase orders
+			purchaseOrders = salesorderRes.get("purchaseorders");
+			for each  purchaseOrder in purchaseOrders
+			{
+				purchaseOrderID = purchaseOrder.get("purchaseorder_id");
+				poRes = invokeurl
+				[
+					url :"https://www.zohoapis.com/inventory/v1/purchaseorders/" + purchaseOrderID + "?organization_id=" + organizationID
+					type :GET
+					connection:"zom"
+				];
+				po = poRes.get("purchaseorder");
+				poNumbers = po.get("purchaseorder_number");
+				shippingPOCheck = containsIgnoreCase(poNumbers,"-S");
+				returnPOCheck = containsIgnoreCase(poNumbers,"-R");
+				//only pulling PO's without '-S'
+				if(!shippingPOCheck && !returnPOCheck)
+				{
+					customFields = po.get("custom_fields");
+					POCarrier = po.get("ship_via");
+					trackingNumber = null;
+					for each  field in customFields
+					{
+						if(field.get("api_name") = "cf_tracking_number")
+						{
+							POTrackingNumber = field.get("value_formatted");
+							if(POTrackingNumber != null && POTrackingNumber != "")
+							{
+								if(POTrackingNumber.contains(","))
+								{
+									POTrackingNumberList = POTrackingNumber.toList(",");
+									for each  POTrackingNumb in POTrackingNumberList
+									{
+										POTrackingMap = Map();
+										POTrackingMap.put("carrier",POCarrier);
+										POTrackingMap.put("tracking",trim(POTrackingNumb));
+										trackingNumbers.add(POTrackingMap);
+									}
+								}
+								else
+								{
+									POTrackingMap = Map();
+									POTrackingMap.put("carrier",POCarrier);
+									POTrackingMap.put("tracking",trim(POTrackingNumber));
+									trackingNumbers.add(POTrackingMap);
+									break;
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		trackingNumbers = trackingNumbers.distinct();
+		amountOfTrackingNumbers = trackingNumbers.size();
+		deliveredCount = 0;
+		//looping through tracking numbers with aftership API to check if all of them are delivered
+		if(!trackingNumbers.isEmpty())
+		{
+			for each  trackingNumber in trackingNumbers
+			{
+				headerMap = Map();
+				headerMap.put("Content-Type","application/json");
+				headerMap.put("as-api-key",~REDACTED~);
+				tNumb = trackingNumber.get("tracking");
+				carrier = trackingNumber.get("carrier");
+				//getting correct slug for aftership API
+				slug = "";
+				if(carrier.containsIgnoreCase("fedex") && carrier.notContains("freight"))
+				{
+					slug = "fedex";
+				}
+				if(carrier.containsIgnoreCase("ups"))
+				{
+					slug = "ups";
+				}
+				if(carrier.containsIgnoreCase("r&l"))
+				{
+					slug = "rl-carriers";
+				}
+				if(carrier.containsIgnoreCase("rl car"))
+				{
+					slug = "rl-carriers";
+				}
+				if(carrier.containsIgnoreCase("usps"))
+				{
+					slug = "usps";
+				}
+				if(carrier.containsIgnoreCase("southeastern freight lines"))
+				{
+					slug = "sefl";
+				}
+				if(carrier.containsIgnoreCase("southeastern freight"))
+				{
+					slug = "sefl";
+				}
+				if(carrier.containsIgnoreCase("sefl"))
+				{
+					slug = "sefl";
+				}
+				if(carrier.containsIgnoreCase("dayton"))
+				{
+					slug = "dayton-freight";
+				}
+				if(carrier.containsIgnoreCase("estes"))
+				{
+					slug = "estes";
+				}
+				if(carrier.containsIgnoreCase("saia"))
+				{
+					slug = "saia-freight";
+				}
+				if(carrier.containsIgnoreCase("xpo"))
+				{
+					slug = "xpo-logistics";
+				}
+				if(carrier.containsIgnoreCase("gls"))
+				{
+					slug = "gso";
+				}
+				if(carrier.containsIgnoreCase("gso"))
+				{
+					slug = "gso";
+				}
+				//unique catch for fedex freight because it has a special character
+				if(carrier.containsIgnoreCase("fedex") && carrier.containsIgnoreCase("freight"))
+				{
+					slug = "fedex-freight";
+				}
+				if(carrier.containsIgnoreCase("old dominion"))
+				{
+					slug = "old-dominion";
+				}
+				if(carrier.containsIgnoreCase("n&m"))
+				{
+					slug = "nmtransfer";
+				}
+				if(carrier.containsIgnoreCase("averitt"))
+				{
+					slug = "averitt";
+				}
+				if(carrier.containsIgnoreCase("yrc"))
+				{
+					slug = "yrc";
+				}
+				if(carrier.containsIgnoreCase("aaa"))
+				{
+					slug = "aaa-cooper";
+				}
+				if(slug = "")
+				{
+					info "Slug not found";
+					break;
+				}
+				getDeliveryStatus = invokeurl
+				[
+					url :"https://api.aftership.com/tracking/2024-04/trackings/" + slug + "/" + tNumb
+					type :GET
+					headers:headerMap
+				];
+				code = getDeliveryStatus.get("meta").get("code");
+				if(code.toString() == "200")
+				{
+					tag = getDeliveryStatus.get("data").get("tracking").get("tag");
+					info tNumb + " - " + tag;
+					if(tag.containsIgnoreCase("delivered"))
+					{
+						deliveredCount = deliveredCount + 1;
+					}
+				}
+				else
+				{
+					//4004 is tracking does not exist. if a label is made but USPS hasn't picked it up yet, this happens. and it will flood IT inbox.
+					if(code.toString() != "4004")
+					{
+						sendmail
+						[
+							from :zoho.loginuserid
+							to :~REDACTED~
+							subject :"updateorderstatusonstore Aftership error"
+							message :"Order number: " + soNumb + "<br>Error: " + getDeliveryStatus
+						]
+					}
+				}
+			}
+		}
+		//comparing the size of the list of tracking numbers and the amount of them that are delivered. if they are the same, setting the order status to delivered on the store. 
+		if(amountOfTrackingNumbers == deliveredCount)
+		{
+			orderStatusID = "80";
+		}
+	}
+}
+info "Amount of tracking numbers: " + amountOfTrackingNumbers;
+info "Amount of tracking numbers delivered: " + deliveredCount;
+if(orderStatusID = "1000")
+{
+	info "The sales order is not fully invoiced/voided.";
+	return;
+}
+//END OF DETERMINING STATUS
+order_id = salesorder.get("salesorder_number");
+//GETTING API TOKEN FOR USE
+paramsForToken = Map();
+//API username
+paramsForToken.put("username","orderStatus");
+//getting the correct store, url, and key for api
+//keys should be the same for development and live, so when we go live on development sites it will work fine
+key = "none";
+//dynamically getting store information from Zoho Sheet "Store Tags/ID's/URL's/Keys/Information for Deluge" in Folder "Store Reporting Tags / Account ID's / Etc (For Deluge)" in IT Workdrive
+getStoreInformation = zoho.sheet.getRecords(~REDACTED~,"StoreInfo",Map());
+storeRecords = getStoreInformation.get("records");
+for each  storeRecord in storeRecords
+{
+	tempStore = storeRecord.get("Store");
+	if(trim(lower(tempStore)) == trim(lower(siteName)))
+	{
+		store = storeRecord.get("StoreAbbrv");
+		storeURL = storeRecord.get("StoreURL");
+		key = storeRecord.get("OpenCartAPIKey");
+	}
+}
+if(key = "none")
+{
+	sendmail
+	[
+		from :zoho.loginuserid
+		to :~REDACTED~
+		subject :"Function updateOrderStatusOnStore Error on Zoho Inventory"
+		message :"'key' variable did not get assigned for order # " + order_id
+	]
+	return;
+}
+paramsForToken.put("key",key);
+getApiToken = invokeurl
+[
+	url :storeURL + "/index.php?route=api/login"
+	type :POST
+	parameters:paramsForToken
+];
+if(getApiToken.contains("token"))
+{
+	//setting api token for use on the store
+	apiToken = getApiToken.get("api_token").toString();
+}
+else
+{
+	sendmail
+	[
+		from :zoho.loginuserid
+		to :~REDACTED~
+		subject :"Function updateOrderStatusOnStore Error on Zoho Inventory"
+		message :"Error when retrieving key on " + store + " for order " + order_id + "<p>Error: " + getApiToken + "</p>"
+	]
+	return;
+}
+//END OF GETTING API TOKEN
+//CHECKING CURRENT ORDER STATUS ON THE STORE
+getCurrentOrderStatus = invokeurl
+[
+	url :storeURL + "/index.php?route=api/order/info&api_token=" + apiToken + "&order_id=" + order_id
+	type :POST
+];
+if(getCurrentOrderStatus.containKey("error"))
+{
+	info getCurrentOrderStatus;
+	sendmail
+	[
+		from :zoho.loginuserid
+		to :~REDACTED~
+		subject :"Function updateOrderStatusOnStore Error on Zoho Inventory"
+		message :"Error encountered when determining current order status for order " + order_id + "<p>Error: " + getCurrentOrderStatus + "</p>"
+	]
+}
+else
+{
+	//getting the current order status on the store and making sure that it is not already set to the correct one
+	currentOrderStatus = getCurrentOrderStatus.get("order").get("order_status_id");
+	if(!currentOrderStatus == orderStatusID)
+	{
+		//since the id on the store is not the same as the one we assigned here, we will update the status on the store
+		//starting updating order on store
+		updatingOrderOnStoreParams = Map();
+		updatingOrderOnStoreParams.put("order_status_id",orderStatusID);
+		//if order is voided, putting a comment to say that it is voided and setting it to notify the customer
+		if(orderStatusID == "60")
+		{
+			updatingOrderOnStoreParams.put("comment","Order has been voided on " + today + ".");
+			updatingOrderOnStoreParams.put("notify","1");
+		}
+		//order has fully shipped out
+		else if(orderStatusID == "70")
+		{
+			updatingOrderOnStoreParams.put("notify","0");
+		}
+		//order is fully delivered
+		else if(orderStatusID == "80")
+		{
+			deliveredCommentString = "Order has been delivered. Tracking numbers: ";
+			for each  tracking in trackingNumbers
+			{
+				tNumb = trackingNumber.get("tracking");
+				carrier = trackingNumber.get("carrier");
+				deliveredCommentString = deliveredCommentString + tNumb + " (" + carrier + "), ";
+			}
+			//stripping off the space and comma off of the last tracking number
+			deliveredCommentString = substring(deliveredCommentString,0,deliveredCommentString.length() - 2);
+			updatingOrderOnStoreParams.put("comment",deliveredCommentString);
+			updatingOrderOnStoreParams.put("notify","0");
+		}
+		updatingOrderOnStore = invokeurl
+		[
+			url :storeURL + "/index.php?route=api/order/history&api_token=" + apiToken + "&order_id=" + order_id
+			type :POST
+			parameters:updatingOrderOnStoreParams
+		];
+	}
+	else
+	{
+		info "Order status is already voided/shipped/delivered, no need to do anything";
+	}
+}
